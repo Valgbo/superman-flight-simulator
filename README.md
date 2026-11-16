@@ -47,13 +47,15 @@ npm run preview
 
 The production files are generated in `dist/`. Vite uses relative asset URLs so the build can be hosted under a repository subpath. GitHub Actions runs the tests and production build for pushes and pull requests.
 
-## Optional GitHub Pages deployment
+## GitHub Pages deployment
 
-Publishing is manual. The repository includes a **Deploy to GitHub Pages** workflow, but pushing code does not publish the game.
+The **Deploy to GitHub Pages** workflow publishes `dist/` after tests and a production build. It runs automatically on pushes to `main` and can also be run manually, matching the deployment used by the Flying Aircraft Carrier site.
 
 1. Open the repository's **Settings → Pages** and set **Source** to **GitHub Actions**.
 2. Open **Actions → Deploy to GitHub Pages → Run workflow**.
-3. Select the branch containing the game, run it, and open the deployment URL shown by the `github-pages` environment.
+3. Select `main`, run it, and open the deployment URL shown by the `github-pages` environment. Later pushes to `main` deploy automatically.
+
+After Pages is enabled and the workflow succeeds, the game is served at https://valgbo.github.io/superman-flight-simulator/.
 
 Pages for a private repository may require an eligible GitHub plan. Check the Pages audience before deploying: a private repository can produce a publicly accessible Pages site, depending on account settings.
 
