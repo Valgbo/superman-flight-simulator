@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#090e17" />
     <meta name="description" content="Take flight above Metropolis. Break the sound barrier, smash through skyscrapers, and journey to the Sun in a browser flight simulator." />
     <title>Superman · Flight over Metropolis</title>
@@ -28,7 +28,7 @@
           <h1>The sky is only<br/>the beginning<span>.</span></h1>
           <p>A city beneath you. A universe ahead.<br/>Take flight over Metropolis, break the sound barrier,<br class="desktop-break"/> and find your way to the Sun.</p>
           <button id="start-button" class="primary-button">Begin flight <span aria-hidden="true">↗</span></button>
-          <div class="intro-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>to fly</span><span class="hint-dot">·</span><span>Drag to look around</span></div>
+          <div class="intro-hint" id="intro-control-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>to fly</span><span class="hint-dot">·</span><span>Drag to look around</span></div>
           <div class="intro-features"><span>DESTRUCTIBLE CITY</span><span>MACH 2 TURBO</span><span>EARTH TO SUN</span></div>
         </section>
         <div id="reticle" aria-hidden="true" hidden><span></span></div>
@@ -36,8 +36,19 @@
         <div id="toast" role="status" aria-live="polite"></div>
         <div id="waypoint" hidden><span class="waypoint-diamond"></span><strong id="waypoint-name">THE SUN</strong><span id="waypoint-distance"></span></div>
         <div class="touch-controls" id="touch-controls" hidden>
-          <div class="touch-pad"><button data-key="KeyW" aria-label="Fly forward">▲</button><div><button data-key="KeyA" aria-label="Strafe left">◀</button><button data-key="KeyS" aria-label="Brake">■</button><button data-key="KeyD" aria-label="Strafe right">▶</button></div></div>
-          <div class="touch-altitude"><button data-key="Space" aria-label="Ascend">↑</button><button data-key="ControlLeft" aria-label="Descend">↓</button></div>
+          <div class="joystick-area">
+            <div id="move-stick" class="virtual-joystick" role="group" aria-label="Movement joystick. Drag up to fly forward, down to fly backward, and sideways to strafe." tabindex="0">
+              <div class="joystick-guide" aria-hidden="true"><span>↑</span><span>→</span><span>↓</span><span>←</span></div>
+              <div id="move-thumb" class="joystick-thumb" aria-hidden="true"><span></span></div>
+            </div>
+            <span class="joystick-label">MOVE</span>
+          </div>
+          <div class="touch-look-hint" aria-hidden="true"><span>↔</span> DRAG THE SKY TO LOOK</div>
+          <div class="touch-flight-actions" aria-label="Touch flight actions">
+            <button data-touch-action="ascend" class="touch-action" aria-label="Hold to ascend"><span aria-hidden="true">↑</span><small>UP</small></button>
+            <button data-touch-action="descend" class="touch-action" aria-label="Hold to descend"><span aria-hidden="true">↓</span><small>DOWN</small></button>
+            <button data-touch-action="brake" class="touch-action touch-brake" aria-label="Brake and hover. Disengages turbo and hyperspeed."><span aria-hidden="true">◈</span><small>HOVER</small></button>
+          </div>
         </div>
       </main>
       <footer class="cockpit">
@@ -64,6 +75,8 @@
         <div class="dialog-heading"><span class="eyebrow">FLIGHT SYSTEMS</span><button id="close-settings" class="icon-button" aria-label="Close controls and settings">×</button></div>
         <h2 id="dialog-title">Make yourself at home.</h2><p class="dialog-description">Hover over the rooftops. Or see how far you can go.</p>
         <div class="controls-grid"><span><kbd>W</kbd> / <kbd>S</kbd></span><span>Forward / brake</span><span><kbd>A</kbd> / <kbd>D</kbd></span><span>Strafe left / right</span><span><kbd>SPACE</kbd> / <kbd>CTRL</kbd></span><span>Ascend / descend</span><span>Mouse drag / <kbd>↑↓←→</kbd></span><span>Steer</span><span><kbd>SHIFT</kbd> / <kbd>H</kbd></span><span>Turbo / hyperspeed</span><span><kbd>ESC</kbd></span><span>Pause flight</span></div>
+        <p class="dialog-description">Touch: drag the left joystick to move; drag the sky with another finger to steer. Hold Up or Down to change altitude. Hover brakes and switches off turbo.</p>
+        <div class="settings-row"><label for="touch-mode">Show touch controls</label><input type="checkbox" id="touch-mode" /></div>
         <div class="settings-row"><label for="sensitivity">Steering sensitivity</label><input type="range" id="sensitivity" min="0.3" max="2" step="0.1" value="1" /></div>
         <div class="settings-row"><label for="quality">Graphics quality</label><select id="quality"><option value="high">High</option><option value="low">Performance</option></select></div>
         <div class="settings-row"><label for="reduced-motion">Reduce camera effects</label><input type="checkbox" id="reduced-motion" /></div>

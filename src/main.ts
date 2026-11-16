@@ -1,10 +1,12 @@
 import './style.css';
+import './touch.css';
 import { ACESFilmicToneMapping, Clock, Euler, MathUtils, PerspectiveCamera, Scene, Vector3, WebGLRenderer } from 'three';
 import { FlightSimulation, type FlightInput } from './flight';
 import { Hero } from './hero';
 import { World } from './world';
 import { FlightAudio } from './audio';
-import { EARTH_SPEED_LIMIT, MACH_ONE, SPACE_ALTITUDE, SUN_POSITION, SUN_RADIUS } from './config';
+import { TouchControls } from './touch-controls';
+import { EARTH_SPEED_LIMIT, MACH_ONE, SPACE_ALTITUDE, SPAWN_POSITION, SUN_POSITION, SUN_RADIUS } from './config';
 
 const element = <T extends HTMLElement = HTMLElement>(id: string) => {
   const found = document.getElementById(id);
@@ -12,12 +14,12 @@ const element = <T extends HTMLElement = HTMLElement>(id: string) => {
   return found as T;
 };
 
-interface Settings { sensitivity: number; lowQuality: boolean; reducedMotion: boolean }
+interface Settings { sensitivity: number; lowQuality: boolean; reducedMotion: boolean; touchControls: boolean }
 function loadSettings(): Settings {
-  const defaults = { sensitivity: 1, lowQuality: false, reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches };
+  const defaults = { sensitivity: 1, lowQuality: false, reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches, touchControls: matchMedia('(any-pointer: coarse)').matches };
   try {
     const saved = JSON.parse(localStorage.getItem('metropolis-flight-settings') || '{}');
-    return { sensitivity: MathUtils.clamp(Number(saved.sensitivity) || 1, 0.3, 2), lowQuality: saved.lowQuality === true, reducedMotion: typeof saved.reducedMotion === 'boolean' ? saved.reducedMotion : defaults.reducedMotion };
+    return { sensitivity: MathUtils.clamp(Number(saved.sensitivity) || 1, 0.3, 2), lowQuality: saved.lowQuality === true, reducedMotion: typeof saved.reducedMotion === 'boolean' ? saved.reducedMotion : defaults.reducedMotion, touchControls: typeof saved.touchControls === 'boolean' ? saved.touchControls : defaults.touchControls };
   } catch { return defaults; }
 }
 
@@ -36,8 +38,6 @@ function init() {
   const settings = loadSettings();
   const dialog = element<HTMLDialogElement>('settings-dialog');
   const keys = new Set<string>();
-  const touchKeys = new Set<string>();
-  const coarsePointer = matchMedia('(pointer: coarse)').matches;
   const input: FlightInput = { forward: 0, strafe: 0, vertical: 0, boost: false, brake: false, lookX: 0, lookY: 0 };
   const direction = new Vector3(), right = new Vector3(), localUp = new Vector3();
   const previous = new Vector3(), movement = new Vector3(), cameraGoal = new Vector3(), cameraTarget = new Vector3(), projection = new Vector3();
@@ -50,6 +50,12 @@ function init() {
   let route: 'free' | 'orbit' | 'sun' = 'free';
   let sunAfterOrbit = false;
   let toastTimer: ReturnType<typeof setTimeout>;
+  let mousePointerId: number | null = null;
+  const touch = new TouchControls({
+    stick: element('move-stick'), thumb: element('move-thumb'), lookSurface: canvas,
+    canInteract: () => started && !paused && settings.touchControls,
+    onActivity: () => { route = 'free'; sunAfterOrbit = false; },
+  });
 
   const hud = {
     speed: element('speed'), unit: element('speed-unit'), mode: element('flight-mode'), altitude: element('altitude'), mach: element('mach'),
@@ -57,6 +63,7 @@ function init() {
     turbo: element<HTMLButtonElement>('turbo-button'), hyper: element<HTMLButtonElement>('hyper-button'), hyperCaption: element('hyper-caption'),
     speedLines: element('speed-lines'), waypoint: element('waypoint'), waypointName: element('waypoint-name'), waypointDistance: element('waypoint-distance'),
   };
+  const destinations = Array.from(document.querySelectorAll('.destination'));
 
   function notify(message: string, duration = 3800) {
     clearTimeout(toastTimer);
@@ -68,11 +75,23 @@ function init() {
   }
   function resize() {
     camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
-    renderer.setPixelRatio(Math.min(devicePixelRatio, settings.lowQuality ? 1 : 1.7));
+    renderer.setPixelRatio(Math.min(devicePixelRatio, settings.lowQuality ? 1 : settings.touchControls ? 1.35 : 1.7));
     renderer.setSize(innerWidth, innerHeight);
     world.setQuality(settings.lowQuality);
   }
-  resize(); window.addEventListener('resize', resize);
+  function applyTouchMode() {
+    touch.reset();
+    element('app').classList.toggle('touch-enabled', settings.touchControls);
+    element('touch-controls').hidden = !started || !settings.touchControls;
+    element<HTMLInputElement>('touch-mode').checked = settings.touchControls;
+    element('intro-control-hint').innerHTML = settings.touchControls
+      ? '<span>Left joystick to move</span><span class="hint-dot">·</span><span>Drag the sky to steer</span>'
+      : '<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>to fly</span><span class="hint-dot">·</span><span>Drag to look around</span>';
+    element('control-hint').textContent = settings.touchControls ? 'JOYSTICK TO MOVE · DRAG TO STEER · HOVER TO STOP' : 'WASD TO FLY · SPACE TO RISE · DRAG TO STEER · ESC TO PAUSE';
+    resize();
+  }
+  applyTouchMode();
+  window.addEventListener('resize', () => { touch.reset(); resize(); });
   camera.position.copy(flight.position).add(new Vector3(19, 8, 29));
 
   function beginFlight(captureMouse = false) {
@@ -83,13 +102,12 @@ function init() {
       setTimeout(() => { element('intro').hidden = true; }, 550);
       element('reticle').hidden = false;
       element('pause-button').hidden = false;
-      element('touch-controls').hidden = !coarsePointer;
-      element('control-hint').textContent = 'WASD TO FLY · SPACE TO RISE · DRAG TO STEER · ESC TO PAUSE';
-      notify(coarsePointer ? 'Drag the sky to steer. Use the flight buttons to move.' : 'W to fly · Space to rise · Hold Shift for Mach 2', 5000);
+      element('touch-controls').hidden = !settings.touchControls;
+      notify(settings.touchControls ? 'Left thumb to move. Drag the sky to steer. Hover to stop.' : 'W to fly · Space to rise · Hold Shift for Mach 2', 5000);
     }
     paused = false;
     canvas.focus({ preventScroll: true });
-    if (captureMouse && !coarsePointer && canvas.requestPointerLock) {
+    if (captureMouse && !settings.touchControls && canvas.requestPointerLock) {
       try {
         const lockRequest = canvas.requestPointerLock() as Promise<void> | undefined;
         lockRequest?.catch(() => notify('Mouse capture unavailable. Drag the sky or use arrow keys to steer.'));
@@ -97,7 +115,7 @@ function init() {
     }
   }
 
-  function clearInput() { keys.clear(); touchKeys.clear(); pendingLookX = 0; pendingLookY = 0; dragging = false; }
+  function clearInput() { keys.clear(); touch.reset(); pendingLookX = 0; pendingLookY = 0; dragging = false; mousePointerId = null; }
   function openSettings() {
     if (dialog.open) return;
     paused = true; clearInput();
@@ -172,6 +190,10 @@ function init() {
   quality.addEventListener('change', () => { settings.lowQuality = quality.value === 'low'; resize(); saveSettings(); });
   const reduce = element<HTMLInputElement>('reduced-motion'); reduce.checked = settings.reducedMotion;
   reduce.addEventListener('change', () => { settings.reducedMotion = reduce.checked; saveSettings(); });
+  element<HTMLInputElement>('touch-mode').addEventListener('change', event => {
+    settings.touchControls = (event.target as HTMLInputElement).checked;
+    clearInput(); applyTouchMode(); saveSettings();
+  });
 
   const movementKeys = new Set(['KeyW','KeyS','KeyA','KeyD','Space','ControlLeft','ControlRight','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','ShiftLeft','ShiftRight']);
   window.addEventListener('keydown', event => {
@@ -191,7 +213,8 @@ function init() {
   });
   document.addEventListener('pointerlockerror', () => notify('Drag the sky or use arrow keys to steer.'));
   canvas.addEventListener('pointerdown', event => {
-    if (!started || paused) return;
+    if (((event.pointerType === 'touch' || event.pointerType === 'pen') && settings.touchControls) || !started || paused || mousePointerId !== null) return;
+    mousePointerId = event.pointerId;
     dragging = true; lastPointerX = event.clientX; lastPointerY = event.clientY;
     canvas.setPointerCapture(event.pointerId); canvas.focus({ preventScroll: true });
   });
@@ -201,34 +224,31 @@ function init() {
     if (Math.abs(dx) + Math.abs(dy) > 1) { route = 'free'; sunAfterOrbit = false; }
   }
   document.addEventListener('pointermove', event => {
-    if (!started || paused) return;
+    if (((event.pointerType === 'touch' || event.pointerType === 'pen') && settings.touchControls) || !started || paused) return;
     if (locked) steer(event.movementX, event.movementY);
-    else if (dragging) { steer(event.clientX - lastPointerX, event.clientY - lastPointerY); lastPointerX = event.clientX; lastPointerY = event.clientY; }
+    else if (dragging && event.pointerId === mousePointerId) { steer(event.clientX - lastPointerX, event.clientY - lastPointerY); lastPointerX = event.clientX; lastPointerY = event.clientY; }
   });
-  canvas.addEventListener('pointerup', () => { dragging = false; });
-  canvas.addEventListener('pointercancel', () => { dragging = false; });
-  canvas.addEventListener('lostpointercapture', () => { dragging = false; });
-  document.querySelectorAll<HTMLButtonElement>('[data-key]').forEach(button => {
-    const code = button.dataset.key!;
-    button.addEventListener('pointerdown', event => {
-      event.preventDefault(); button.setPointerCapture(event.pointerId); touchKeys.add(code); route = 'free'; sunAfterOrbit = false;
-    });
-    for (const event of ['pointerup','pointercancel','lostpointercapture']) button.addEventListener(event, () => touchKeys.delete(code));
-  });
+  function releaseMouse(event: PointerEvent) { if (event.pointerId === mousePointerId) { dragging = false; mousePointerId = null; } }
+  canvas.addEventListener('pointerup', releaseMouse);
+  canvas.addEventListener('pointercancel', releaseMouse);
+  canvas.addEventListener('lostpointercapture', releaseMouse);
 
-  function pressed(...codes: string[]) { return codes.some(code => keys.has(code) || touchKeys.has(code)); }
+  function pressed(...codes: string[]) { return codes.some(code => keys.has(code)); }
   function flash() {
     if (settings.reducedMotion) return;
     const overlay = element('flash'); overlay.classList.add('active');
     setTimeout(() => overlay.classList.remove('active'), 60);
   }
   function updateFlight(dt: number) {
-    input.forward = Number(pressed('KeyW'));
-    input.strafe = Number(pressed('KeyD')) - Number(pressed('KeyA'));
-    input.vertical = Number(pressed('Space')) - Number(pressed('ControlLeft','ControlRight'));
-    input.boost = pressed('ShiftLeft','ShiftRight'); input.brake = pressed('KeyS');
-    input.lookX = pendingLookX + (Number(pressed('ArrowRight')) - Number(pressed('ArrowLeft'))) * dt * settings.sensitivity;
-    input.lookY = pendingLookY + (Number(pressed('ArrowUp')) - Number(pressed('ArrowDown'))) * dt * settings.sensitivity;
+    const analog = touch.state;
+    const touchLook = touch.consumeLook();
+    input.forward = MathUtils.clamp(Number(pressed('KeyW')) + analog.forward, -1, 1);
+    input.strafe = MathUtils.clamp(Number(pressed('KeyD')) - Number(pressed('KeyA')) + analog.strafe, -1, 1);
+    input.vertical = MathUtils.clamp(Number(pressed('Space')) - Number(pressed('ControlLeft','ControlRight')) + analog.vertical, -1, 1);
+    input.boost = pressed('ShiftLeft','ShiftRight'); input.brake = pressed('KeyS') || analog.brake;
+    if (analog.brake) { flight.turbo = false; flight.hyper = false; }
+    input.lookX = pendingLookX + touchLook.x * settings.sensitivity + (Number(pressed('ArrowRight')) - Number(pressed('ArrowLeft'))) * dt * settings.sensitivity;
+    input.lookY = pendingLookY + touchLook.y * settings.sensitivity + (Number(pressed('ArrowUp')) - Number(pressed('ArrowDown'))) * dt * settings.sensitivity;
     pendingLookX = 0; pendingLookY = 0;
     if (route === 'orbit') {
       input.lookY += (Math.PI * 0.48 - flight.pitch) * Math.min(1, dt * 2);
@@ -286,11 +306,11 @@ function init() {
     hud.hyper.setAttribute('aria-pressed', String(isHyper));
     hud.hyperCaption.textContent = flight.inSpace ? 'THE UNIVERSE AWAITS' : 'UNLOCKS IN SPACE';
     hud.speedLines.style.opacity = settings.reducedMotion || !started ? '0' : isHyper ? '0.9' : String(Math.min(0.55, speed / 1300));
-    document.querySelectorAll('.destination').forEach(e => e.classList.remove('selected'));
+    destinations.forEach(e => e.classList.remove('selected'));
     element(route === 'sun' || flight.mode === 'SOLAR CHARGE' ? 'sun-route' : flight.inSpace || route === 'orbit' ? 'orbit-route' : 'city-route').classList.add('selected');
     hud.waypoint.hidden = !started;
     if (started) {
-      const target = flight.solarCharge >= 1 ? new Vector3(0, 145, 920) : SUN_POSITION;
+      const target = flight.solarCharge >= 1 ? SPAWN_POSITION : SUN_POSITION;
       projection.copy(target).project(camera);
       const ahead = direction.dot(movement.copy(target).sub(camera.position)) > 0;
       hud.waypoint.style.left = `${ahead ? MathUtils.clamp((projection.x * 0.5 + 0.5) * 100, 12, 88) : 50}%`;
@@ -306,7 +326,7 @@ function init() {
     element('fatal-error').hidden = false;
   });
   function animate() {
-    const dt = Math.min(clock.getDelta(), 0.05);
+    const dt = Math.min(clock.getDelta(), 0.1);
     if (!paused) time += dt;
     if (started && !paused) updateFlight(dt);
     flight.direction(direction); right.crossVectors(direction, up).normalize(); localUp.crossVectors(right, direction).normalize();
@@ -324,7 +344,8 @@ function init() {
     camera.lookAt(cameraTarget);
     if (shake > 0 && !paused) { camera.position.x += (Math.random() - 0.5) * shake; camera.position.y += (Math.random() - 0.5) * shake; shake *= Math.exp(-dt * 5); }
     const goalFov = settings.reducedMotion ? 62 : flight.hyper ? 88 : 62 + Math.min(13, flight.speed / 53);
-    camera.fov = MathUtils.lerp(camera.fov, goalFov, 1 - Math.exp(-dt * 2)); camera.updateProjectionMatrix();
+    const nextFov = MathUtils.lerp(camera.fov, goalFov, 1 - Math.exp(-dt * 2));
+    if (Math.abs(nextFov - camera.fov) > 0.001) { camera.fov = nextFov; camera.updateProjectionMatrix(); }
     world.update(paused ? 0 : dt, flight.position, time, settings.reducedMotion);
     audio.update(flight.speed, flight.inSpace, flight.hyper, paused || !started);
     if (time - lastHud > 0.075 || paused) { updateHud(); lastHud = time; }

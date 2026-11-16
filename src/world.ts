@@ -1,12 +1,14 @@
 import {
   AdditiveBlending, BackSide, Box3, BoxGeometry, BufferGeometry, CanvasTexture,
-  Color, CylinderGeometry, DirectionalLight, Float32BufferAttribute, FogExp2,
+  Color, CylinderGeometry, DirectionalLight, EquirectangularReflectionMapping, Float32BufferAttribute, FogExp2,
   Group, HemisphereLight, InstancedMesh, MathUtils, Mesh, MeshBasicMaterial,
   MeshStandardMaterial, Object3D, PlaneGeometry, Points, PointsMaterial, RepeatWrapping,
-  Scene, ShaderMaterial, SphereGeometry, Sprite, SpriteMaterial, TorusGeometry, Vector3,
+  Scene, ShaderMaterial, SphereGeometry, Sprite, SpriteMaterial, SRGBColorSpace, TorusGeometry, Vector3,
 } from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SUN_POSITION, SUN_RADIUS } from './config';
 import { segmentBoxFraction } from './world-math';
+import { buildingBoxGeometry } from './building-geometry';
 
 export interface Building {
   bounds: Box3;
@@ -55,6 +57,9 @@ export class World {
   private lastFade = -1;
   private lowQuality = false;
   private globe: Group | null = null;
+  private buildingDetails: { group: Group; position: Vector3 }[] = [];
+  private facadeMaterials: MeshStandardMaterial[] = [];
+  private detailTimer = 0;
 
   constructor(scene: Scene) {
     this.scene = scene;
@@ -62,6 +67,8 @@ export class World {
     scene.add(this.city);
     scene.background = new Color(0x8db6cf);
     scene.fog = this.fog;
+    scene.environment = this.environmentTexture();
+    scene.environmentIntensity = 0.55;
     this.hemisphere = new HemisphereLight(0xc4e0ff, 0x4f4740, 2.35);
     this.sunlight = new DirectionalLight(0xffe3af, 3.0);
     this.sunlight.position.set(-1600, 2400, 1100);
@@ -127,38 +134,107 @@ export class World {
     return material;
   }
   private box(parent: Group, x: number, y: number, z: number, w: number, h: number, d: number, material: MeshStandardMaterial | MeshBasicMaterial | MeshStandardMaterial[]) {
-    const mesh = new Mesh(new BoxGeometry(w, h, d), material);
+    const mesh = new Mesh(buildingBoxGeometry(w, h, d), material);
     mesh.position.set(x, y, z);
     parent.add(mesh);
     return mesh;
   }
 
-  private facadeTexture(tone: string) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 128; canvas.height = 256;
-    const context = canvas.getContext('2d')!;
-    context.fillStyle = tone; context.fillRect(0, 0, 128, 256);
-    for (let row = 0; row < 32; row++) {
-      for (let col = 0; col < 12; col++) {
-        const lit = this.random() > 0.48;
-        context.fillStyle = lit ? (this.random() > 0.4 ? '#adc3cb' : '#e7cc94') : '#142d3b';
-        context.fillRect(col * 10.67 + 2, row * 8 + 2, 5, 4);
-        context.fillStyle = '#617580';
-        context.fillRect(col * 10.67 + 1, row * 8 + 7, 8, 1);
+  /** A static sky/street panorama supplies glass reflections without extra render passes. */
+  private environmentTexture() {
+    const canvas = document.createElement('canvas'); canvas.width = 1024; canvas.height = 512;
+    const ctx = canvas.getContext('2d')!;
+    const sky = ctx.createLinearGradient(0, 0, 0, 512);
+    sky.addColorStop(0, '#6095c9'); sky.addColorStop(0.38, '#a7c9df');
+    sky.addColorStop(0.51, '#f4e6ce'); sky.addColorStop(0.54, '#64717b'); sky.addColorStop(1, '#253842');
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, 1024, 512);
+    const sun = ctx.createRadialGradient(165, 170, 1, 165, 170, 95);
+    sun.addColorStop(0, 'rgba(255,247,214,1)'); sun.addColorStop(0.16, 'rgba(255,234,194,0.7)'); sun.addColorStop(1, 'rgba(255,234,194,0)');
+    ctx.fillStyle = sun; ctx.fillRect(0, 50, 330, 240);
+    for (let i = 0; i < 42; i++) {
+      const x = i * 25; const height = 12 + ((i * 31) % 63);
+      ctx.fillStyle = i % 3 ? '#435a6c' : '#607782'; ctx.fillRect(x, 280 - height, 17 + i % 8, height + 45);
+    }
+    const texture = new CanvasTexture(canvas); texture.colorSpace = SRGBColorSpace;
+    texture.mapping = EquirectangularReflectionMapping;
+    return texture;
+  }
+
+  private facadeMaterial(style: number) {
+    const palette = [
+      { wall: '#6e899b', pane: '#42738b', trim: '#b6c7cc', stone: false },
+      { wall: '#263a46', pane: '#294958', trim: '#677e89', stone: false },
+      { wall: '#c7bda6', pane: '#374f5b', trim: '#e0d4bd', stone: true },
+      { wall: '#8c8170', pane: '#466773', trim: '#c5ac82', stone: true },
+      { wall: '#a0bbc6', pane: '#729aaf', trim: '#d2dcdf', stone: false },
+    ][style];
+    const canvases = Array.from({ length: 3 }, () => { const c = document.createElement('canvas'); c.width = c.height = 512; return c; });
+    const [color, roughness, emissive] = canvases.map(canvas => canvas.getContext('2d')!);
+    color.fillStyle = palette.wall; color.fillRect(0, 0, 512, 512);
+    roughness.fillStyle = palette.stone ? '#dedede' : '#b8b8b8'; roughness.fillRect(0, 0, 512, 512);
+    emissive.fillStyle = '#000000'; emissive.fillRect(0, 0, 512, 512);
+    // A 64m tile contains sixteen 4m storeys and bays. Geometry UVs keep this scale.
+    for (let row = 0; row < 16; row++) {
+      for (let col = 0; col < 16; col++) {
+        const x = col * 32; const y = row * 32;
+        const insetX = palette.stone ? 9 : 2; const insetY = palette.stone ? 5 : 2;
+        const width = 32 - insetX * 2; const height = palette.stone ? 20 : 27;
+        color.fillStyle = '#1d3544'; color.fillRect(x + insetX - 1, y + insetY - 1, width + 2, height + 3);
+        const pane = color.createLinearGradient(x, y, x + 22, y + 31);
+        pane.addColorStop(0, palette.pane); pane.addColorStop(0.44, palette.trim); pane.addColorStop(1, palette.pane);
+        color.fillStyle = pane; color.fillRect(x + insetX, y + insetY, width, height);
+        color.fillStyle = `rgba(8,27,44,${0.06 + this.random() * 0.16})`; color.fillRect(x + insetX, y + insetY, width, height);
+        roughness.fillStyle = palette.stone ? '#6a6a6a' : '#3b3b3b'; roughness.fillRect(x + insetX, y + insetY, width, height);
+        if (this.random() > 0.85) {
+          color.fillStyle = this.random() > 0.4 ? 'rgba(242,215,160,0.78)' : 'rgba(191,211,211,0.5)';
+          color.fillRect(x + insetX + 1, y + insetY + 1, width - 2, height - 2);
+          emissive.fillStyle = '#d8a85b'; emissive.fillRect(x + insetX + 1, y + insetY + 1, width - 2, height - 2);
+          color.fillStyle = '#4b534f'; color.fillRect(x + insetX + width * 0.53, y + insetY, 1, height);
+        }
+        color.fillStyle = palette.trim;
+        color.fillRect(x, y + 30, 32, palette.stone ? 2 : 1);
+        if (palette.stone) { color.fillStyle = '#aa9d86'; color.fillRect(x, y, 1, 32); }
       }
     }
-    const texture = new CanvasTexture(canvas);
-    texture.wrapS = texture.wrapT = RepeatWrapping;
-    texture.anisotropy = 2;
-    return texture;
+    const [map, roughnessMap, emissiveMap] = canvases.map((canvas, i) => {
+      const texture = new CanvasTexture(canvas); texture.wrapS = texture.wrapT = RepeatWrapping;
+      texture.anisotropy = 4; if (i !== 1) texture.colorSpace = SRGBColorSpace; return texture;
+    });
+    const mat = new MeshStandardMaterial({ map, roughnessMap, emissiveMap, bumpMap: roughnessMap,
+      bumpScale: palette.stone ? 0.32 : 0.12, roughness: 1, metalness: palette.stone ? 0.04 : 0.42,
+      color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0.18, envMapIntensity: palette.stone ? 0.3 : 0.85 });
+    mat.userData.fullBumpMap = roughnessMap;
+    this.cityMaterials.add(mat); this.facadeMaterials.push(mat);
+    return mat;
+  }
+
+  /** Merge architecture by material so richer silhouettes stay cheap to draw. */
+  private bakeArchitecture(group: Group) {
+    const batches = new Map<MeshStandardMaterial | MeshBasicMaterial, BufferGeometry[]>();
+    const originals: Mesh[] = [];
+    for (const object of group.children) {
+      if (!(object instanceof Mesh) || Array.isArray(object.material)) continue;
+      object.updateMatrix();
+      const material = object.material as MeshStandardMaterial | MeshBasicMaterial;
+      if (!batches.has(material)) batches.set(material, []);
+      batches.get(material)!.push(object.geometry.clone().applyMatrix4(object.matrix));
+      originals.push(object);
+    }
+    for (const mesh of originals) { group.remove(mesh); mesh.geometry.dispose(); }
+    for (const [material, geometries] of batches) {
+      const geometry = mergeGeometries(geometries, false);
+      for (const part of geometries) part.dispose();
+      if (geometry) group.add(new Mesh(geometry, material));
+    }
   }
 
   private makeCity() {
     const ground = this.material(0x748b7e);
     const asphalt = this.material(0x263a46);
     const pavement = this.material(0xa4a8a1);
-    const roof = this.material(0x65747b);
+    const roof = this.material(0x596a73);
     const stone = this.material(0xbab9a8);
+    const trim = this.material(0x9aaab0, 0.42); trim.metalness = 0.45;
     const garden = this.material(0x496e50);
     const water = this.material(0x397d9d, 0.25);
     this.box(this.city, 0, -18, 0, 5900, 30, 5900, ground);
@@ -191,11 +267,15 @@ export class World {
     stripes.count = stripe;
     this.city.add(stripes);
 
-    const facades = ['#4e6573', '#76848a', '#829193', '#5b737c', '#a49d88'].map((tone, i) => {
-      const mat = new MeshStandardMaterial({ map: this.facadeTexture(tone), roughness: 0.62, metalness: i % 2 ? 0.15 : 0.3, color: 0xffffff });
-      this.cityMaterials.add(mat);
-      return mat;
-    });
+    const facades = Array.from({ length: 5 }, (_, i) => this.facadeMaterial(i));
+    const shadowCanvas = document.createElement('canvas'); shadowCanvas.width = shadowCanvas.height = 64;
+    const shadowContext = shadowCanvas.getContext('2d')!;
+    const shadowGradient = shadowContext.createRadialGradient(32, 32, 12, 32, 32, 32);
+    shadowGradient.addColorStop(0, 'rgba(0,0,0,0.5)'); shadowGradient.addColorStop(1, 'rgba(0,0,0,0)');
+    shadowContext.fillStyle = shadowGradient; shadowContext.fillRect(0, 0, 64, 64);
+    const contactMaterial = new MeshBasicMaterial({ map: new CanvasTexture(shadowCanvas), transparent: true, depthWrite: false, opacity: 0.5, color: 0x16232d });
+    this.cityMaterials.add(contactMaterial);
+    const contacts: { x: number; z: number; width: number; depth: number }[] = [];
     const treeTrunks: { x: number; y: number; z: number }[] = [];
     const treeCrowns: { x: number; y: number; z: number; size: number }[] = [];
     for (let gx = -7; gx < 7; gx++) {
@@ -222,27 +302,22 @@ export class World {
         const width = 155 + this.random() * 80;
         const depth = 155 + this.random() * 80;
         const group = new Group(); group.position.set(x, 0, z);
-        const facade = facades[Math.floor(this.random() * facades.length)];
-        const faceMaterials = facade;
-        const podiumHeight = 12 + this.random() * 20;
-        this.box(group, 0, podiumHeight / 2, 0, width + 18, podiumHeight, depth + 18, stone);
-        this.box(group, 0, height / 2, 0, width, height, depth, faceMaterials);
-        this.box(group, 0, height + 2, 0, width + 3, 4, depth + 3, roof);
-        if (height > 220) {
-          const upperHeight = 20 + this.random() * 50;
-          this.box(group, 0, height + upperHeight / 2, 0, width * 0.7, upperHeight, depth * 0.7, faceMaterials);
-          this.box(group, 0, height + upperHeight + 2, 0, width * 0.72, 4, depth * 0.72, stone);
-        }
-        if (height > 290 && this.random() > 0.4) {
-          const spire = new Mesh(new CylinderGeometry(0.6, 1.5, 55, 5), stone);
-          spire.position.set(0, height + 65, 0); group.add(spire);
-        }
+        const style = Math.floor(this.random() * facades.length);
+        this.makeTower(group, width, height, depth, style, facades[style], stone, roof, trim);
         const rubble = this.box(this.city, x, 5, z, width * 0.9, 10, depth * 0.9, roof);
         rubble.visible = false;
         this.city.add(group);
-        this.buildings.push({ group, rubble, destroyed: false, bounds: new Box3(new Vector3(x - (width + 18) / 2, 0, z - (depth + 18) / 2), new Vector3(x + (width + 18) / 2, height + (height > 220 ? 76 : 4), z + (depth + 18) / 2)) });
+        this.buildings.push({ group, rubble, destroyed: false, bounds: new Box3().setFromObject(group) });
+        contacts.push({ x, z, width: width + 85, depth: depth + 85 });
       }
     }
+    const contactShadows = new InstancedMesh(new PlaneGeometry(1, 1), contactMaterial, contacts.length);
+    contacts.forEach((contact, i) => {
+      this.dummy.position.set(contact.x, 2.1, contact.z); this.dummy.rotation.set(-Math.PI / 2, 0, 0);
+      this.dummy.scale.set(contact.width, contact.depth, 1); this.dummy.updateMatrix(); contactShadows.setMatrixAt(i, this.dummy.matrix);
+    });
+    this.city.add(contactShadows);
+    this.dummy.rotation.set(0, 0, 0);
     const trunkMesh = new InstancedMesh(new CylinderGeometry(1.2, 1.6, 10, 5), this.material(0x665344), treeTrunks.length);
     const crownMesh = new InstancedMesh(new SphereGeometry(1, 6, 5), this.material(0x376447), treeCrowns.length);
     treeTrunks.forEach((t, i) => {
@@ -259,9 +334,73 @@ export class World {
     }
   }
 
+  private makeTower(group: Group, width: number, height: number, depth: number, style: number,
+    facade: MeshStandardMaterial, stone: MeshStandardMaterial, roof: MeshStandardMaterial, trim: MeshStandardMaterial) {
+    const deco = style === 2 || style === 3;
+    const podiumHeight = deco ? 28 : 16;
+    this.box(group, 0, podiumHeight / 2, 0, width + 18, podiumHeight, depth + 18, stone);
+    // Real setbacks and offset volumes produce a varied skyline even from orbit.
+    if (style === 1) {
+      this.box(group, -width * 0.16, height / 2, 0, width * 0.68, height, depth, facade);
+      this.box(group, width * 0.34, height * 0.4, depth * 0.06, width * 0.32, height * 0.8, depth * 0.87, facade);
+      this.box(group, -width * 0.16, height + 2, 0, width * 0.7, 4, depth + 3, trim);
+      this.box(group, width * 0.34, height * 0.8 + 2, depth * 0.06, width * 0.33, 4, depth * 0.89, trim);
+    } else if (deco && height > 160) {
+      const tiers = [0.72, 0.89, 1];
+      let bottom = podiumHeight;
+      tiers.forEach((top, i) => {
+        const topY = height * top; const factor = 1 - i * 0.18;
+        this.box(group, 0, (bottom + topY) / 2, 0, width * factor, topY - bottom, depth * factor, facade);
+        this.box(group, 0, topY + 2, 0, width * factor + 7, 4, depth * factor + 7, stone);
+        bottom = topY + 4;
+      });
+    } else {
+      this.box(group, 0, height / 2, 0, width, height, depth, facade);
+      this.box(group, 0, height + 2, 0, width + 4, 4, depth + 4, trim);
+      if (height > 210) {
+        this.box(group, 0, height + 16, 0, width * 0.68, 28, depth * 0.68, facade);
+        this.box(group, 0, height + 32, 0, width * 0.7, 4, depth * 0.7, trim);
+      }
+    }
+    // Corner piers create genuine facade depth. All piers share one baked draw call.
+    const shaftHeight = deco && height > 160 ? height * 0.72 : height;
+    const pierMaterial = deco ? stone : trim;
+    const pierWidth = style === 1 ? width * 0.68 : width;
+    const pierOffset = style === 1 ? -width * 0.16 : 0;
+    for (const side of [-1, 1]) {
+      for (const corner of [-1, 1]) {
+        this.box(group, pierOffset + side * (pierWidth / 2 - 1), shaftHeight / 2, corner * (depth / 2 - 1), deco ? 5 : 2.5, shaftHeight, deco ? 5 : 2.5, pierMaterial);
+      }
+    }
+    if (deco) {
+      for (const offset of [-0.27, 0, 0.27]) {
+        for (const face of [-1, 1]) this.box(group, width * offset, shaftHeight / 2, face * (depth / 2 + 1), 3.5, shaftHeight, 3, stone);
+      }
+    }
+    if (height > 300 && style !== 1) {
+      const spireHeight = deco ? 52 : 35;
+      const spire = new Mesh(new CylinderGeometry(0.7, 2, spireHeight, 6), trim);
+      const spireBase = height + (deco ? 4 : 34);
+      spire.position.set(0, spireBase + spireHeight / 2, 0); group.add(spire);
+    }
+    this.bakeArchitecture(group);
+    const detail = new Group(); detail.name = 'Nearby rooftop detail';
+    if (style === 1) detail.position.x = -width * 0.16;
+    const rooftop = height + (height > 210 && !deco && style !== 1 ? 35 : 5);
+    for (let i = 0; i < 3; i++) {
+      this.box(detail, -width * 0.18 + i * width * 0.17, rooftop + 4, 0, width * 0.11, 8, depth * 0.2, roof);
+      this.box(detail, -width * 0.18 + i * width * 0.17, rooftop + 8.5, 0, width * 0.1, 1, depth * 0.19, trim);
+    }
+    this.bakeArchitecture(detail);
+    group.add(detail);
+    this.buildingDetails.push({ group: detail, position: group.position.clone().setY(height) });
+  }
+
   private makeDailyPlanet(facade: MeshStandardMaterial, stone: MeshStandardMaterial, roof: MeshStandardMaterial) {
     const existing = this.buildings.find(b => b.group.position.x === -180 && b.group.position.z === -180);
     if (!existing) return;
+    existing.group.traverse(object => { if (object instanceof Mesh) object.geometry.dispose(); });
+    this.buildingDetails = this.buildingDetails.filter(detail => detail.group.parent !== existing.group);
     existing.group.clear();
     const group = existing.group;
     const faces = facade;
@@ -271,6 +410,18 @@ export class World {
     this.box(group, 0, 440, 0, 100, 35, 100, stone);
     this.box(group, 0, 471, 0, 16, 40, 16, stone);
     const gold = this.material(0xc6a767, 0.3);
+    gold.metalness = 0.72;
+    for (const level of [{ y: 49, w: 250 }, { y: 391, w: 200 }, { y: 428, w: 151 }, { y: 459, w: 106 }]) {
+      this.box(group, 0, level.y, 0, level.w, 4, level.w, gold);
+    }
+    for (const offset of [-0.4, -0.2, 0, 0.2, 0.4]) {
+      for (const face of [-1, 1]) {
+        this.box(group, offset * 192, 209, face * 97, 4, 354, 3, stone);
+        this.box(group, face * 97, 209, offset * 192, 3, 354, 4, stone);
+      }
+    }
+    this.box(group, 0, 34, 124, 42, 28, 3, facade);
+    this.box(group, 0, 20, 127, 66, 3, 8, gold);
     this.globe = new Group(); this.globe.position.set(0, 514, 0);
     const planet = new Mesh(new SphereGeometry(31, 20, 14), gold);
     this.globe.add(planet);
@@ -278,13 +429,25 @@ export class World {
       const ring = new Mesh(new TorusGeometry(40, 1.2, 5, 48), gold);
       ring.rotation.set(Math.PI / 2 + i * 0.18, 0.5 * i, 0.22 * i); this.globe.add(ring);
     }
+    const engraving = this.material(0x655e43, 0.55);
+    for (let i = 0; i < 4; i++) {
+      const meridian = new Mesh(new TorusGeometry(31.1, 0.45, 4, 36), engraving);
+      meridian.rotation.y = i * Math.PI / 4; this.globe.add(meridian);
+    }
+    this.bakeArchitecture(this.globe);
     group.add(this.globe);
     const label = document.createElement('canvas'); label.width = 1024; label.height = 128;
     const ctx = label.getContext('2d')!;
     ctx.fillStyle = '#e1c18b'; ctx.font = '700 75px Georgia, serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('DAILY PLANET', 512, 68);
-    const mat = new MeshBasicMaterial({ map: new CanvasTexture(label), transparent: true, color: 0xffffff }); this.cityMaterials.add(mat);
-    const sign = new Mesh(new PlaneGeometry(174, 23), mat); sign.position.set(0, 346, 97); group.add(sign);
-    existing.bounds.set(new Vector3(-305, 0, -305), new Vector3(-55, 558, -55));
+    const signTexture = new CanvasTexture(label); signTexture.colorSpace = SRGBColorSpace;
+    const mat = new MeshBasicMaterial({ map: signTexture, transparent: true, color: 0xffffff, depthWrite: false }); this.cityMaterials.add(mat);
+    for (let side = 0; side < 4; side++) {
+      const angle = side * Math.PI / 2;
+      const sign = new Mesh(new PlaneGeometry(174, 23), mat);
+      sign.position.set(Math.sin(angle) * 98.5, 365, Math.cos(angle) * 98.5); sign.rotation.y = angle; group.add(sign);
+    }
+    this.bakeArchitecture(group);
+    existing.bounds.setFromObject(group).expandByScalar(0.1);
   }
 
   private makeEarth() {
@@ -438,13 +601,25 @@ export class World {
     if (this.globe && !reducedMotion) this.globe.rotation.y = time * 0.08;
     const fade = 1 - smoothstep(2800, 6500, position.y);
     this.city.visible = fade > 0.005;
+    this.detailTimer -= dt;
+    if (this.detailTimer <= 0) {
+      this.detailTimer = 0.2;
+      const detailDistanceSq = (this.lowQuality ? 500 : 1350) ** 2;
+      for (const detail of this.buildingDetails) {
+        const dx = position.x - detail.position.x; const dy = position.y - detail.position.y; const dz = position.z - detail.position.z;
+        detail.group.visible = this.city.visible && dx * dx + dy * dy + dz * dz < detailDistanceSq;
+      }
+    }
     if (Math.abs(fade - this.lastFade) > 0.005) {
       this.lastFade = fade;
       for (const material of this.cityMaterials) {
-        const transparent = fade < 0.999 || material instanceof SpriteMaterial || (!!material.map?.image && material instanceof MeshBasicMaterial);
+        const baseOpacity = material.userData.baseOpacity ?? (material.userData.baseOpacity = material.opacity);
+        const baseTransparent = material.userData.baseTransparent ?? (material.userData.baseTransparent = material.transparent);
+        const baseDepthWrite = material.userData.baseDepthWrite ?? (material.userData.baseDepthWrite = material.depthWrite);
+        const transparent = fade < 0.999 || baseTransparent;
         if (material.transparent !== transparent) { material.transparent = transparent; material.needsUpdate = true; }
-        material.opacity = fade * (material instanceof SpriteMaterial ? 0.65 : 1);
-        material.depthWrite = fade > 0.65 && !(material instanceof SpriteMaterial);
+        material.opacity = fade * baseOpacity;
+        material.depthWrite = fade > 0.65 && baseDepthWrite;
       }
     }
     let dirty = false;
@@ -473,12 +648,21 @@ export class World {
   }
 
   setQuality(low: boolean) {
+    if (this.lowQuality !== low) {
+      for (const material of this.facadeMaterials) {
+        material.bumpMap = low ? null : material.userData.fullBumpMap;
+        material.needsUpdate = true;
+      }
+    }
     this.lowQuality = low;
+    this.detailTimer = 0;
     this.clouds.visible = !low;
     this.stars.geometry.setDrawRange(0, low ? 700 : 1600);
   }
 
   dispose() {
+    this.scene.environment?.dispose();
+    this.scene.environment = null;
     this.scene.traverse(object => {
       if (object instanceof Mesh || object instanceof Points) {
         object.geometry.dispose();
